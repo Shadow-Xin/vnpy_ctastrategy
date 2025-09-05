@@ -84,6 +84,7 @@ class CtaEngine(BaseEngine):
         self.classes: dict = {}                                         # class_name: stategy_class
         self.strategies: dict = {}                                      # strategy_name: strategy
 
+        self.strategy_gateway_map: dict = {}                        # strategy_name: gateway_name
         self.symbol_strategy_map: defaultdict = defaultdict(list)       # vt_symbol: strategy list
         self.orderid_strategy_map: dict = {}                            # vt_orderid: strategy
         self.strategy_orderid_map: defaultdict = defaultdict(set)       # strategy_name: orderid set
@@ -147,8 +148,10 @@ class CtaEngine(BaseEngine):
     def process_tick_event(self, event: Event) -> None:
         """"""
         tick: TickData = event.data
+        gateway = tick.gateway_name
 
         strategies: list = self.symbol_strategy_map[tick.vt_symbol]
+        strategies = [s for s in strategies if self.strategy_gateway_map[s.strategy_name] == gateway]
         if not strategies:
             return
 
@@ -248,6 +251,7 @@ class CtaEngine(BaseEngine):
                         price = tick.bid_price_5
 
                 contract: ContractData | None = self.main_engine.get_contract(stop_order.vt_symbol)
+                contract.gateway_name = self.strategy_gateway_map[stop_order.strategy_name]
 
                 vt_orderids: list = self.send_limit_order(
                     strategy,
@@ -304,7 +308,7 @@ class CtaEngine(BaseEngine):
             volume=volume,
             reference=f"{APP_NAME}_{strategy.strategy_name}"
         )
-
+        contract.gateway_name = self.strategy_gateway_map[strategy.strategy_name]
         # Convert with offset converter
         req_list: list[OrderRequest] = self.main_engine.convert_order_request(
             original_req,
@@ -625,7 +629,7 @@ class CtaEngine(BaseEngine):
             self.write_log(msg, strategy)
 
     def add_strategy(
-        self, class_name: str, strategy_name: str, vt_symbol: str, setting: dict
+        self, class_name: str, strategy_name: str, gateway_name: str, vt_symbol: str, setting: dict
     ) -> None:
         """
         Add a new strategy.
@@ -651,12 +655,13 @@ class CtaEngine(BaseEngine):
         strategy: CtaTemplate = strategy_class(self, strategy_name, vt_symbol, setting)
         self.strategies[strategy_name] = strategy
 
+        self.strategy_gateway_map[strategy_name] = gateway_name
         # Add vt_symbol to strategy map.
         strategies: list = self.symbol_strategy_map[vt_symbol]
         strategies.append(strategy)
 
         # Update to setting file.
-        self.update_strategy_setting(strategy_name, setting)
+        self.update_strategy_setting(strategy_name, gateway_name, setting)
 
         self.put_strategy_event(strategy)
 
@@ -691,10 +696,12 @@ class CtaEngine(BaseEngine):
 
         # Subscribe market data
         contract: ContractData | None = self.main_engine.get_contract(strategy.vt_symbol)
+        contract.gateway_name = self.strategy_gateway_map[strategy_name]
         if contract:
             req: SubscribeRequest = SubscribeRequest(
                 symbol=contract.symbol, exchange=contract.exchange)
             self.main_engine.subscribe(req, contract.gateway_name)
+            # self.main_engine.subscribe(req, self.strategy_gateway_map[strategy_name])
         else:
             self.write_log(_("行情订阅失败，找不到合约{}").format(strategy.vt_symbol), strategy)
 
@@ -744,14 +751,13 @@ class CtaEngine(BaseEngine):
         # Update GUI
         self.put_strategy_event(strategy)
 
-    def edit_strategy(self, strategy_name: str, setting: dict) -> None:
+    def edit_strategy(self, strategy_name: str, gateway_name: str, setting: dict) -> None:
         """
         Edit parameters of a strategy.
         """
         strategy: CtaTemplate = self.strategies[strategy_name]
         strategy.update_setting(setting)
-
-        self.update_strategy_setting(strategy_name, setting)
+        self.update_strategy_setting(strategy_name, gateway_name, setting)
         self.put_strategy_event(strategy)
 
     def remove_strategy(self, strategy_name: str) -> bool:
@@ -781,6 +787,7 @@ class CtaEngine(BaseEngine):
 
         # Remove from strategies
         self.strategies.pop(strategy_name)
+        self.strategy_gateway_map.pop(strategy_name)
 
         self.write_log(_("策略{}移除成功").format(strategy.strategy_name))
         return True
@@ -900,18 +907,21 @@ class CtaEngine(BaseEngine):
             self.add_strategy(
                 strategy_config["class_name"],
                 strategy_name,
+                strategy_config['gateway_name'],
                 strategy_config["vt_symbol"],
                 strategy_config["setting"]
             )
 
-    def update_strategy_setting(self, strategy_name: str, setting: dict) -> None:
+    def update_strategy_setting(self, strategy_name: str, gateway_name: str, setting: dict) -> None:
         """
         Update setting file.
         """
         strategy: CtaTemplate = self.strategies[strategy_name]
 
+        self.strategy_gateway_map[strategy_name] = gateway_name
         self.strategy_setting[strategy_name] = {
             "class_name": strategy.__class__.__name__,
+            "gateway_name": gateway_name,
             "vt_symbol": strategy.vt_symbol,
             "setting": setting,
         }

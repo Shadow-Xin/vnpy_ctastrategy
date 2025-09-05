@@ -164,16 +164,24 @@ class CtaManager(QtWidgets.QWidget):
             return
 
         parameters: dict = self.cta_engine.get_strategy_class_parameters(class_name)
-        editor: SettingEditor = SettingEditor(parameters, class_name=class_name)
+        
+        # 将 main_engine 中的 gateways 传递给 SettingEditor
+        editor: SettingEditor = SettingEditor(
+            parameters,
+            class_name=class_name,
+            gateways=self.main_engine.gateways
+        )
+        
         n: int = editor.exec_()
 
         if n == editor.DialogCode.Accepted:
             setting: dict = editor.get_setting()
             vt_symbol: str = setting.pop("vt_symbol")
             strategy_name: str = setting.pop("strategy_name")
+            gateway_name: str = setting.pop("gateway")
 
             self.cta_engine.add_strategy(
-                class_name, strategy_name, vt_symbol, setting
+                class_name, strategy_name, gateway_name, vt_symbol, setting
             )
 
     def find_strategy(self) -> None:
@@ -213,6 +221,7 @@ class StrategyManager(QtWidgets.QFrame):
 
         self.strategy_name: str = data["strategy_name"]
         self._data: dict = data
+        self.label: QtWidgets.QLabel = None
 
         self.init_ui()
 
@@ -239,16 +248,9 @@ class StrategyManager(QtWidgets.QFrame):
         self.remove_button: QtWidgets.QPushButton = QtWidgets.QPushButton(_("移除"))
         self.remove_button.clicked.connect(self.remove_strategy)
 
-        strategy_name: str = self._data["strategy_name"]
-        vt_symbol: str = self._data["vt_symbol"]
-        class_name: str = self._data["class_name"]
-        author: str = self._data["author"]
-
-        label_text: str = (
-            f"{strategy_name}  -  {vt_symbol}  ({class_name} by {author})"
-        )
-        label: QtWidgets.QLabel = QtWidgets.QLabel(label_text)
-        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.label = QtWidgets.QLabel()
+        self.label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.update_label()
 
         self.parameters_monitor: DataMonitor = DataMonitor(self._data["parameters"])
         self.variables_monitor: DataMonitor = DataMonitor(self._data["variables"])
@@ -261,15 +263,34 @@ class StrategyManager(QtWidgets.QFrame):
         hbox.addWidget(self.remove_button)
 
         vbox: QtWidgets.QVBoxLayout = QtWidgets.QVBoxLayout()
-        vbox.addWidget(label)
+        vbox.addWidget(self.label)
         vbox.addLayout(hbox)
         vbox.addWidget(self.parameters_monitor)
         vbox.addWidget(self.variables_monitor)
         self.setLayout(vbox)
 
+    def update_label(self) -> None:
+        """
+        Update the text of the main label.
+        """
+        strategy_name: str = self._data["strategy_name"]
+        vt_symbol: str = self._data["vt_symbol"]
+        class_name: str = self._data["class_name"]
+        author: str = self._data["author"]
+        
+        # This is the key part: it re-fetches the account from the engine,
+        # which will have been updated after an edit.
+        account: str = self.cta_engine.strategy_gateway_map.get(strategy_name, "N/A")
+
+        label_text: str = (
+            f"{strategy_name}  -  {vt_symbol}  ({class_name} by {author}) | 账户: {account}"
+        )
+        self.label.setText(label_text)
+
     def update_data(self, data: dict) -> None:
         """"""
         self._data = data
+        self.update_label()
 
         self.parameters_monitor.update_data(data["parameters"])
         self.variables_monitor.update_data(data["variables"])
@@ -311,12 +332,17 @@ class StrategyManager(QtWidgets.QFrame):
         strategy_name: str = self._data["strategy_name"]
 
         parameters: dict = self.cta_engine.get_strategy_parameters(strategy_name)
-        editor: SettingEditor = SettingEditor(parameters, strategy_name=strategy_name)
+        editor: SettingEditor = SettingEditor(
+            parameters,
+            strategy_name=strategy_name,
+            gateways=self.cta_engine.main_engine.gateways
+            )
         n: int = editor.exec_()
 
         if n == editor.DialogCode.Accepted:
             setting: dict = editor.get_setting()
-            self.cta_engine.edit_strategy(strategy_name, setting)
+            gateway_name: str = setting.pop("gateway")
+            self.cta_engine.edit_strategy(strategy_name, gateway_name, setting)
 
     def remove_strategy(self) -> None:
         """"""
@@ -441,7 +467,11 @@ class SettingEditor(QtWidgets.QDialog):
     """
 
     def __init__(
-        self, parameters: dict, strategy_name: str = "", class_name: str = ""
+        self,
+        parameters: dict,
+        strategy_name: str = "",
+        class_name: str = "",
+        gateways: dict = None
     ) -> None:
         """"""
         super().__init__()
@@ -449,8 +479,9 @@ class SettingEditor(QtWidgets.QDialog):
         self.parameters: dict = parameters
         self.strategy_name: str = strategy_name
         self.class_name: str = class_name
-
+        self.gateways: dict = gateways
         self.edits: dict = {}
+        self.gateway_combo: QtWidgets.QComboBox = None  # 用于持有下拉框的引用
 
         self.init_ui()
 
@@ -462,13 +493,37 @@ class SettingEditor(QtWidgets.QDialog):
         if self.class_name:
             self.setWindowTitle(_("添加策略：{}").format(self.class_name))
             button_text: str = _("添加")
-            parameters: dict = {"strategy_name": "", "vt_symbol": ""}
-            parameters.update(self.parameters)
+
+            # 先添加固定的 strategy_name 和 vt_symbol 输入框
+            base_parameters: dict = {"strategy_name": "", "vt_symbol": ""}
+            for name, value in base_parameters.items():
+                type_: type = type(value)
+                edit: QtWidgets.QLineEdit = QtWidgets.QLineEdit(str(value))
+                form.addRow(f"{name} {type_}", edit)
+                self.edits[name] = (edit, type_)
+
+            # 如果传入了gateways，则添加 gateway 下拉框
+            if self.gateways:
+                self.gateway_combo = QtWidgets.QComboBox()
+                gateway_names = list(self.gateways.keys())
+                self.gateway_combo.addItems(gateway_names)
+                self.gateway_combo.setMinimumWidth(110)
+                form.addRow("gateway", self.gateway_combo)
+
+            # 将策略本身的参数赋值给parameters变量，用于后续处理
+            parameters = self.parameters
         else:
             self.setWindowTitle(_("参数编辑：{}").format(self.strategy_name))
             button_text = _("确定")
+            if self.gateways:
+                self.gateway_combo = QtWidgets.QComboBox()
+                gateway_names = list(self.gateways.keys())
+                self.gateway_combo.addItems(gateway_names)
+                self.gateway_combo.setMinimumWidth(110)
+                form.addRow("gateway", self.gateway_combo)
             parameters = self.parameters
 
+        # 为所有策略参数（或编辑模式下的所有参数）创建输入框
         for name, value in parameters.items():
             type_: type = type(value)
 
@@ -505,6 +560,10 @@ class SettingEditor(QtWidgets.QDialog):
 
         if self.class_name:
             setting["class_name"] = self.class_name
+
+        # 如果 gateway 下拉框存在，则获取其选中的值
+        if self.gateway_combo:
+            setting["gateway"] = self.gateway_combo.currentText()
 
         for name, tp in self.edits.items():
             edit, type_ = tp
