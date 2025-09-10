@@ -696,12 +696,12 @@ class CtaEngine(BaseEngine):
 
         # Subscribe market data
         contract: ContractData | None = self.main_engine.get_contract(strategy.vt_symbol)
-        contract.gateway_name = self.strategy_gateway_map[strategy_name]
+
         if contract:
+            contract.gateway_name = self.strategy_gateway_map[strategy_name]
             req: SubscribeRequest = SubscribeRequest(
                 symbol=contract.symbol, exchange=contract.exchange)
             self.main_engine.subscribe(req, contract.gateway_name)
-            # self.main_engine.subscribe(req, self.strategy_gateway_map[strategy_name])
         else:
             self.write_log(_("行情订阅失败，找不到合约{}").format(strategy.vt_symbol), strategy)
 
