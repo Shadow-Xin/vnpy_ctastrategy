@@ -704,6 +704,7 @@ class CtaEngine(BaseEngine):
             self.main_engine.subscribe(req, contract.gateway_name)
         else:
             self.write_log(_("行情订阅失败，找不到合约{}").format(strategy.vt_symbol), strategy)
+            return
 
         # Put event to update init completed status.
         strategy.inited = True
